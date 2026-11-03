@@ -1,0 +1,6 @@
+# 插件管家 (dsh-plugin-manager) 的挂载行。
+# 卸载插件: 在 profile 的 cordis.patch.yml 里给 id: dsh-plugin-manager 写 disabled: true
+- insert:
+    - id: dsh-plugin-manager
+      name: 'dsh-plugin-steward'
+      config: {}
