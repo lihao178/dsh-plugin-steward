@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Plugin Steward",
+    "description": "Update checks, health checks, duplicate analysis, cleanup and auto-update for every plugin, in one panel"
+  }
+}
