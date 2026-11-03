@@ -1,0 +1,31 @@
+name: release
+
+# Pushing a tag like v1.0.0 packs the package exactly as npm would and attaches
+# that tarball to the GitHub release, so the market entry has a stable download
+# without requiring an npm publish.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check syntax
+        run: |
+          for f in index.js client.js bin/dsh-pm.mjs src/*.mjs scripts/*.mjs; do node --check "$f"; done
+      - name: Pack
+        run: npm pack
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tgz'
+          generate_release_notes: true
