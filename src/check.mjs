@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { scanProfile } from './scan.mjs';
 import { fetchPackument, mapLimit } from './registry.mjs';
+import { fetchLatestRelease, githubSource } from './releases.mjs';
 import { satisfies, satisfiesBoth, compare, parse, gt, eq, isPre } from './semver.mjs';
 import { hostVersions } from './host.mjs';
 
@@ -94,6 +95,53 @@ export function pickTargets(pack, spec) {
   return { latest, latestStable: stable.length ? stable[stable.length - 1] : null, wanted, total: sorted.length };
 }
 
+/** 这个包的 package.json 里写了 GitHub 仓库地址吗 (用于给人看的说明, 不参与更新判定) */
+export function pkgHasRepository(p) {
+  const r = (p && p.repository) || null;
+  const url = typeof r === 'string' ? r : (r && r.url) || '';
+  return /github\.com[/:]/.test(String(url));
+}
+
+/** git tag 版本比 npm 上的高吗? 用来判断该不该顺手问一次 GitHub */
+function flatter(installed, packLatest) {
+  const c = compare(packLatest, installed);
+  return c === null ? false : c <= 0;
+}
+
+/**
+ * 走 GitHub Releases 版本源.
+ * 命中并确实有新版本时把 row 填好并返回 true; 与 npm 一致或查不到时返回 false,
+ * 让调用方继续走 npm 的逻辑。
+ */
+async function tryGithubRow(row, p, o, packLatest) {
+  const info = githubSource(p.spec, p.name);
+  if (!info.repo) return false;
+  const rel = await fetchLatestRelease(info.repo, { refresh: o.refreshGithub, maxAgeMs: o.githubMaxAgeMs, timeoutMs: o.timeoutMs });
+  row.github = { repo: info.repo, tag: rel.tag || null, error: rel.error || null };
+  if (!rel.version) return false;
+  row.githubVersion = rel.version;
+  row.githubPublishedAt = rel.publishedAt || null;
+  // 装的时候锁了 tag (github:owner/repo#v1.2.0) 就只看这个 tag, 别自作主张跳版本
+  if (info.pinned) {
+    row.reason = '装的时候锁定了 ' + info.tag + ', 不自动跳版本';
+    row.skipped = 'pinned-git';
+    return true;
+  }
+  if (packLatest && !(gt(rel.version, packLatest))) return false;
+  if (p.version && !gt(rel.version, p.version)) return false;
+  row.versionSource = 'github';
+  row.latest = rel.version;
+  row.latestStable = rel.version;
+  row.wanted = null;
+  row.target = rel.version;
+  row.updatable = true;
+  row.kind = bumpKind(p.version, rel.version);
+  row.pinned = false;
+  row.reason = '可升级 ' + p.version + ' 到 ' + rel.version + ' (来源 GitHub Releases, 不是 npm)';
+  row.githubTarball = rel.tarballUrl || null;
+  return true;
+}
+
 export async function checkProfile(profile, opts) {
   const o = opts || {};
   const s = scanProfile(profile, { orphans: false });
@@ -110,7 +158,8 @@ export async function checkProfile(profile, opts) {
     const policy = (policyRoot && policyRoot.packages && policyRoot.packages[p.name]) || null;
     const row = {
       name: p.name, title: p.title, origin: p.origin, source: p.source, installed: p.installed,
-      current: p.version, spec: p.spec, policy,
+      current: p.version, spec: p.spec, policy, repository: p.repository || null,
+      versionSource: 'npm', github: null, githubVersion: null, githubPublishedAt: null,
       autoInstall: !!(policy && policy.autoInstall === true),
       ignored: false, deferred: false, updatable: false, kind: 'none', reason: '', skipped: null,
       compat: { ok: true, unknown: false, reasons: [], notes: [], prereleaseGate: false },
@@ -137,9 +186,21 @@ export async function checkProfile(profile, opts) {
     }
     const pack = await fetchPackument(p.name, { refresh: o.refresh, maxAgeMs: o.maxAgeMs, timeoutMs: o.timeoutMs });
     if ((!pack.versions || !pack.versions.length) && pack.error) {
+      // npm 上根本没有这个包 —— 它是从 GitHub 直接装的, 换 GitHub Releases 再问一次
+      const gh = await tryGithubRow(row, p, o);
+      if (gh) return row;
       row.skipped = 'offline';
       row.reason = 'registry 查询失败: ' + pack.error;
       return row;
+    }
+    // npm 上的版本追不上 git tag 时 (作者发了 release 忘了发 npm), 也拿去比一次。
+    // 注意只认 spec 里明写的 GitHub 来源 —— package.json 里的 repository 字段
+    // 对 npm 包来说只是"源码在这", 不代表"更新要从这里来", 否则会把 npm 版本盖掉。
+    const specInfo = githubSource(p.spec, p.name);
+    const packLatest = (pack.distTags && pack.distTags.latest) || pack.latest || null;
+    if (specInfo.repo && (!packLatest || (p.version && flatter(p.version, packLatest)))) {
+      const gh = await tryGithubRow(row, p, o, packLatest);
+      if (gh) return row;
     }
     const t = pickTargets(pack, p.spec);
     row.latest = t.latest;
