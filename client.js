@@ -131,6 +131,9 @@ window.__ModuleLoader__.load({
       '    --dpm-warn:#d9a227;',
       '    --dpm-ok:#3fb950;',
       '  }',
+      // 深色主题下按截图那样: 亮轨道 + 深色圆钮 (浅色主题是蓝轨道 + 白圆钮)
+      '  .dpm-sw.on{background:#eef2f6}',
+      '  .dpm-sw.on::after{background:#14181d}',
       '}',
       '.dpm-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--dpm-line)}',
       '.dpm-title{font-size:14px;font-weight:600;margin-right:4px}',
@@ -171,6 +174,16 @@ window.__ModuleLoader__.load({
       '.dpm-ok{color:var(--dpm-ok);font-size:12.5px;margin:6px 0}',
       '.dpm-empty{opacity:.6;padding:18px 0;text-align:center}',
       '.dpm-hr{height:1px;background:var(--dpm-line);margin:14px 0}',
+      // iOS 那种拨动开关: 关=灰底圆钮在左, 开=亮底深钮在右. 整块跟着系统的深色/浅色走.
+      '.dpm-sw{position:relative;display:inline-flex;flex:0 0 auto;align-items:center;width:42px;height:24px;border-radius:999px;border:none;padding:0;cursor:pointer;background:var(--dpm-line-strong);transition:background .2s ease}',
+      '.dpm-sw::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:transform .2s ease,background .2s ease}',
+      '.dpm-sw.on{background:var(--dpm-accent)}',
+      '.dpm-sw.on::after{transform:translateX(18px)}',
+      '.dpm-sw:disabled{opacity:.4;cursor:default}',
+      '.dpm-swrow{display:flex;gap:7px;align-items:center}',
+      '.dpm-prog{height:6px;border-radius:999px;background:var(--dpm-line);overflow:hidden;margin:6px 0}',
+      '.dpm-prog > i{display:block;height:100%;background:var(--dpm-accent);transition:width .3s ease}',
+      '.dpm-log{font-family:ui-monospace,Consolas,monospace;font-size:11px;opacity:.75;white-space:pre-wrap;max-height:72px;overflow:auto;margin-top:4px}',
       '.dpm-sect{font-weight:650;margin:14px 0 6px}',
       // ---- 市场卡片 CSS ----
       // 内嵌市场那页已经隐藏, 但卡片样式留着: 代码还在, 以后想挂回来直接就能用.
@@ -232,6 +245,20 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dpm-card' }, h('b', null, props.value), h('span', null, props.label));
     }
 
+    /** iOS 那种拨动开关. 关=灰底钮在左, 开=亮底(浅色主题是蓝, 深色主题是白)钮在右. */
+    function Switch(props) {
+      const on = props.checked === true;
+      return h('button', {
+        type: 'button',
+        role: 'switch',
+        'aria-checked': on ? 'true' : 'false',
+        className: 'dpm-sw' + (on ? ' on' : ''),
+        disabled: props.disabled,
+        title: props.title,
+        onClick: (e) => { e.preventDefault(); if (props.disabled) return; if (props.onChange) props.onChange(!on); },
+      });
+    }
+
     function PluginRow(props) {
       const p = props.plugin;
       const up = props.update;
@@ -240,6 +267,9 @@ window.__ModuleLoader__.load({
       if (p.groupLabel) subParts.push(p.groupLabel);
       if (p.hostProvided) subParts.push('系统自带, 不用管');
       const desc = p.description || '';
+      const usage = p.usage || '';
+      // 「怎么用」默认收起来: 一屏几十个插件全展开就没法看了
+      const [openUsage, setOpenUsage] = React.useState(false);
       return h(
         'div',
         { className: 'dpm-row', style: { alignItems: 'flex-start' } },
@@ -259,6 +289,37 @@ window.__ModuleLoader__.load({
                 desc,
                 p.descriptionLang === 'en' ? h('span', { style: { opacity: 0.6, marginLeft: 4 } }, '（只有英文说明）') : null,
                 p.needsZh ? h('span', { style: { opacity: 0.6, marginLeft: 4 } }, '· 还没有中文说明') : null
+              )
+            : null,
+          usage
+            ? h(
+                'div',
+                { style: { marginTop: 3 } },
+                h(
+                  'span',
+                  {
+                    className: 'dpm-sub',
+                    onClick: () => setOpenUsage(!openUsage),
+                    style: { cursor: 'pointer', color: 'var(--dpm-accent)', userSelect: 'none' },
+                    title: p.usageHeading ? '摘自插件 README 的「' + p.usageHeading + '」' : '摘自插件的 README',
+                  },
+                  (openUsage ? '▾ ' : '▸ ') + '怎么用'
+                ),
+                openUsage
+                  ? h(
+                      'div',
+                      {
+                        className: 'dpm-sub',
+                        style: {
+                          whiteSpace: 'pre-wrap', lineHeight: 1.55, opacity: 0.86, marginTop: 4,
+                          background: 'var(--dpm-fill)', border: '1px solid var(--dpm-line)',
+                          borderRadius: 6, padding: '7px 9px', maxHeight: 260, overflow: 'auto',
+                          fontFamily: 'inherit', fontSize: 'inherit',
+                        },
+                      },
+                      usage
+                    )
+                  : null
               )
             : null,
           h('div', { className: 'dpm-sub', style: { opacity: 0.5 } }, subParts.join(' · '))
@@ -314,6 +375,10 @@ window.__ModuleLoader__.load({
       const [mktAudit, setMktAudit] = React.useState(null);
       const [mktSort, setMktSort] = React.useState('recent');
       const [mktNoBad, setMktNoBad] = React.useState(false);
+      // 正在跑的更新任务 (异步 job): 有它就画进度条, 没有就不占地方
+      const [job, setJob] = React.useState(null);
+      // 上次装到一半被打断的残留: 有就要提示用户"要不要退回备份"
+      const [recov, setRecov] = React.useState(null);
       // 插件管家自己的开关 (跟插件策略不是一回事): 侧边栏要不要留一格
       const [appCfg, setAppCfg] = React.useState({ showInSidebar: isSidebarEnabled() });
       const [q, setQ] = React.useState('');
@@ -337,9 +402,36 @@ window.__ModuleLoader__.load({
         }
       }, []);
 
+      /**
+       * 顶部「重新读一遍」.
+       * 以前它只是再读一次列表 —— 数据没变化时界面上什么都看不出来, 用户会以为按钮坏了.
+       * 现在它把「列表 + 更新检查 + 备份记录 + 残留提醒」一起刷一遍, 并且把结果说出来.
+       */
+      const doReload = React.useCallback(() => wrap('正在重新读一遍（列表 / 更新 / 备份）…', async () => {
+        const data = await getJson('overview');
+        setOv(data);
+        let chk = null;
+        try {
+          chk = await getJson('check?refresh=1');
+          setCheck(chk);
+        } catch (error) { /* 联网失败不影响其它两项 */ }
+        try { setSnaps(await getJson('snapshots')); } catch (error) {}
+        try { setRecov(await getJson('recover')); } catch (error) { setRecov(null); }
+        const n = (data && data.plugins ? data.plugins.length : 0);
+        const up = chk && chk.summary ? chk.summary.updatable : null;
+        return '读完了：' + n + ' 个插件' + (up == null ? '' : (up ? '，' + up + ' 个能更新' : '，都是最新的'));
+      }), [wrap]);
+
       const loadOverview = React.useCallback(() => wrap('正在读插件列表…', async () => {
         const data = await getJson('overview');
         setOv(data);
+        // 顺手看一眼上次有没有「装到一半被打断」的残留 (独立接口, 失败不影响列表)
+        try {
+          const r = await getJson('recover');
+          setRecov(r);
+        } catch (error) {
+          setRecov(null);
+        }
       }), [wrap]);
 
       /**
@@ -362,7 +454,7 @@ window.__ModuleLoader__.load({
           // 连接被重置 = 宿主已经在退出, 也算信号
           accepted = true;
         }
-        setMsg(head + '正在自动重启软件…（约 5 秒，不用你手动关）');
+        setMsg(head + '正在重启软件：窗口会自己关掉再打开，约 6 秒，不用你操作…');
         const started = Date.now();
         let newPid = null;
         let samePidSeen = false;
@@ -394,7 +486,7 @@ window.__ModuleLoader__.load({
           // 重启后端口可能没变, 但也可能变了 —— 一次性重读, 失败就当还是旧地址
           try { await getJson('overview'); } catch (error) {}
         } else if (samePidSeen) {
-          setMsg(head + '⚠️ 没能自动重启（宿主一直没退出）。请手动关掉软件再打开一次，之后就都能自动了');
+          setMsg(head + '⚠️ 没能重启（旧进程还在）。再点一次「重启软件」试试');
         } else {
           setMsg(head + '⚠️ 重启后没能连回来，等几秒后按 Ctrl+F5 刷新。如果还是不行就手动重开软件一次');
         }
@@ -528,7 +620,7 @@ window.__ModuleLoader__.load({
             if (!r || !r.updatable) return false;
           }
           if (!needle) return true;
-          const hay = [p.name, p.title, p.titleEn, p.description, p.groupLabel].filter(Boolean).join(' ').toLowerCase();
+          const hay = [p.name, p.title, p.titleEn, p.description, p.groupLabel, p.usage].filter(Boolean).join(' ').toLowerCase();
           return hay.indexOf(needle) >= 0;
         });
       }, [plugins, origin, group, upOnly, q, rowsByName]);
@@ -546,38 +638,113 @@ window.__ModuleLoader__.load({
        * 一键更新. 顺序很关键: 先装 → 再重启 → 重启完**重新读**插件列表和更新列表.
        * 以前是重启前就读 check, 于是重启完面板还挂着「能更新 4」, 看着像没装好.
        */
-      const doUpdate = (names) => wrap('正在更新（要下载，差不多一分钟）…', async () => {
-        const out = await postJson('update', { names });
-        const plan = out.plan || {};
-        const ops = plan.ops || [];
-        const applied = out.applied || {};
-        const failed = applied.failed || [];
-        if (failed.length) {
-          await loadCheck(false);
-          await loadOverview();
-          throw new Error('有 ' + failed.length + ' 个没更新成功：' + failed.map((f) => f.name || f).join('、'));
+      /**
+       * 更新: 走异步 job + 轮询进度.
+       * 一次更新几个插件要一两分钟, 同步等只能转圈; 现在后端边装边记账,
+       * 面板每 700ms 拉一次 /update-status, 就能显示「备份 → 装第 2/5 个 → 体检」和 pnpm 最后一行输出.
+       */
+      const doUpdate = (names) => wrap('开始更新…', async () => {
+        let out = null;
+        try {
+          out = await postJson('update', { names, async: true });
+        } catch (error) {
+          out = null;
         }
-        if (!ops.length) {
-          await loadCheck(false);
-          await loadOverview();
-          return '没有需要更新的插件（已经是最新的）';
+        // 老宿主没有 async 模式: 退回同步调用, 至少不会报错
+        if (!out || !out.jobId) {
+          const sync = await postJson('update', { names });
+          const ops = (sync.plan && sync.plan.ops) || [];
+          const failed = ((sync.applied && sync.applied.failed) || []);
+          if (failed.length) {
+            await loadOverview().catch(() => {});
+            await loadCheck(false).catch(() => {});
+            throw new Error('有 ' + failed.length + ' 个没更新成功：' + failed.map((f) => f.name || f).join('、'));
+          }
+          if (!ops.length) return '没有需要更新的插件（已经是最新的）';
+          const restarted = await restartNow('已更新 ' + ops.length + ' 个插件');
+          await loadOverview().catch(() => {});
+          await loadCheck(true).catch(() => {});
+          return restarted
+            ? '已更新 ' + ops.length + ' 个插件，新版本已生效'
+            : '已更新 ' + ops.length + ' 个插件，但没能自动重启 —— 关掉软件再打开一次就会生效';
         }
-        // 重启之后再读, 拿到的才是「新版本已经生效」的列表
-        const restarted = await restartNow('已更新 ' + ops.length + ' 个插件');
+
+        setJob({ id: out.jobId, state: 'running', progress: 0, steps: [], step: '准备中…', elapsedMs: 0, logTail: [] });
+        const started = Date.now();
+        let last = null;
+        while (Date.now() - started < 20 * 60 * 1000) {
+          await new Promise((r) => setTimeout(r, 700));
+          let j = null;
+          try {
+            const got = await getJson('update-status?id=' + encodeURIComponent(out.jobId));
+            j = got && got.job;
+          } catch (error) {
+            continue; // 宿主正在忙, 下一轮再问
+          }
+          if (!j) continue;
+          setJob(j);
+          last = j;
+          if (j.state !== 'running') break;
+        }
         await loadOverview().catch(() => {});
-        await loadCheck(true).catch(() => {}); // refresh=1: 强制重新问一遍 npm, 不吃缓存
-        if (!restarted) {
-          return '已更新 ' + ops.length + ' 个插件' + (applied.snapshot ? '（已备份）' : '') +
-            '，但没能自动重启 —— 关掉软件再打开一次就会生效';
+        await loadCheck(true).catch(() => {});
+
+        const res = (last && last.result) || {};
+        const results = res.results || [];
+        const bad = results.filter((r) => !r.ok);
+        const okN = results.filter((r) => r.ok).length;
+        if (!results.length) {
+          setJob(null);
+          return (last && last.error) ? ('没更新成：' + last.error) : '没有需要更新的插件（已经是最新的）';
         }
-        return '已更新 ' + ops.length + ' 个插件' + (applied.snapshot ? '（已备份）' : '') + '，新版本已生效';
+        if (bad.length) {
+          const why = bad.slice(0, 3).map((b) => b.name + '：' + (b.error || '失败')).join(' ｜ ');
+          setJob(last);
+          throw new Error(bad.length + ' 个没更新成功（' + why + '）' + (res.rollback ? '，已经整体退回备份' : ''));
+        }
+        const restarted = await restartNow('已更新 ' + okN + ' 个插件');
+        setJob(null);
+        await loadOverview().catch(() => {});
+        await loadCheck(true).catch(() => {});
+        if (!restarted) {
+          return '已更新 ' + okN + ' 个插件，但没能自动重启 —— 关掉软件再打开一次就会生效';
+        }
+        return '已更新 ' + okN + ' 个插件' + (res.snapshot ? '（备份在 ' + res.snapshot + '）' : '') + '，新版本已生效';
       });
 
+      /**
+       * 上次更新被打断的善后:
+       *   restore  用当时的快照整体退回去 (装坏了最稳的出路)
+       *   dismiss  只是记录残留, 手动确认不再提醒
+       */
+      const doRecover = (action) => wrap(action === 'restore' ? '正在退回备份…' : '正在处理…', async () => {
+        const r = await postJson('recover', { action });
+        if (action === 'dismiss') {
+          setRecov(null);
+          await loadOverview().catch(() => {});
+          return '好，这条提醒不再出现（备份还留着，随时可以在「设置 → 备份还原」里退回去）';
+        }
+        await restartNow('已退回备份 ' + (r.restored || ''));
+        setRecov(null);
+        await loadOverview().catch(() => {});
+        await loadCheck(true).catch(() => {});
+        return '已退回备份 ' + (r.restored || '') + '，重启后用旧版本起来了';
+      });
+
+      // 关掉 / 打开: 只改配置, 不自动重启软件.
+      // 重启会把整个窗口关掉再打开, 用户只是关一个插件, 不该被这么打断 ——
+      // 而且之前的"自杀式重启"会留下孤儿宿主、抢 task-board 账本锁, 直接导致应用起不来.
       const doToggle = (p) => wrap(p.disabled ? '正在打开…' : '正在关掉…', async () => {
         await postJson('toggle', { name: p.name, disabled: !p.disabled });
-        await restartNow((p.disabled ? '已打开 ' : '已关掉 ') + (p.title || p.name));
         await loadOverview().catch(() => {});
-        return (p.disabled ? '已打开 ' : '已关掉 ') + (p.title || p.name);
+        const what = (p.disabled ? '已打开 ' : '已关掉 ') + (p.title || p.name);
+        return what + ' —— 点上方的「重启软件」才会真正生效';
+      });
+
+      // 手动重启软件: 关干净再自动打开, 用来看新装的插件 / 新代码
+      const doRestart = () => wrap('正在重启软件…', async () => {
+        const ok = await restartNow('');
+        return ok ? '重启好了' : '没能重启，请手动关掉软件再打开一次';
       });
 
       // 卸载: 先让人看清要删什么. 卸载前宿主侧会自动建一份快照, 后悔能回滚.
@@ -636,6 +803,16 @@ window.__ModuleLoader__.load({
         const s = (out.skipped || []).length;
         if (!n) return '没得补（市场目录里也找不到中文说明）：' + s + ' 个';
         return '补好了 ' + n + ' 个插件的中文说明' + (s ? '，跳过 ' + s + ' 个' : '') + ' · 刷新页面就能看到';
+      });
+
+      // 从每个插件自己的 README 里抽「怎么用」那一段, 存进登记表 (升级不会丢)
+      const doFillUsage = () => wrap('正在从插件说明里找「怎么用」…', async () => {
+        const out = await postJson('names', { action: 'fill-usage' });
+        await loadOverview();
+        const n = (out.filled || []).length;
+        const s = (out.skipped || []).length;
+        if (!n) return '这些插件的说明里没写「怎么用」：' + s + ' 个';
+        return '找到了 ' + n + ' 个插件的「怎么用」' + (s ? '，' + s + ' 个作者没写用法' : '') + ' · 展开插件名下面的「怎么用」就能看';
       });
 
       // 侧边栏开关: 写后端 settings.json + 立刻更新本地缓存, 然后重启宿主才真正生效.
@@ -933,6 +1110,7 @@ window.__ModuleLoader__.load({
           h(Btn, { disabled: !!busy, onClick: () => loadCheck(true) }, '查新版本'),
           h(Btn, { tone: 'pri', disabled: !!busy || !updatable.length, onClick: () => doUpdate(updatable) }, '一键全更新 (' + updatable.length + ')'),
           h(Btn, { disabled: !!busy, onClick: doFillNames, title: '把没有中文说明的插件补齐（用市场里的中文介绍）' }, '补中文说明'),
+          h(Btn, { disabled: !!busy, onClick: doFillUsage, title: '从每个插件自己的说明文档里，抽出「装好之后怎么用」那一段' }, '补怎么用'),
           h('input', { className: 'dpm-input', placeholder: '搜插件名 / 中文名 / 说明', value: q, onChange: (e) => setQ(e.target.value) }),
           h('span', { className: 'dpm-sub' }, '哪来的：'),
           h('button', { className: 'dpm-chip' + (origin === 'all' ? ' on' : ''), onClick: () => setOrigin('all') }, '全部'),
@@ -1125,14 +1303,14 @@ window.__ModuleLoader__.load({
               ),
               h(
                 'label',
-                { className: 'dpm-sub', style: { display: 'flex', gap: 4, alignItems: 'center' } },
-                h('input', { type: 'checkbox', checked: pol.checkEnabled !== false, disabled: !!busy, onChange: (e) => doPolicy(p.name, { checkEnabled: e.target.checked }) }),
+                { className: 'dpm-sub dpm-swrow', title: '有新版本时，检查一下' },
+                h(Switch, { checked: pol.checkEnabled !== false, disabled: !!busy, onChange: (v) => doPolicy(p.name, { checkEnabled: v }) }),
                 '自动查新版本'
               ),
               h(
                 'label',
-                { className: 'dpm-sub', style: { display: 'flex', gap: 4, alignItems: 'center' } },
-                h('input', { type: 'checkbox', checked: pol.autoInstall === true, disabled: !!busy, onChange: (e) => doPolicy(p.name, { autoInstall: e.target.checked }) }),
+                { className: 'dpm-sub dpm-swrow', title: '查到新版本就直接装' },
+                h(Switch, { checked: pol.autoInstall === true, disabled: !!busy, onChange: (v) => doPolicy(p.name, { autoInstall: v }) }),
                 '自动装新版'
               )
             );
@@ -1141,13 +1319,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dpm-sect' }, '侧边栏显示「插件管家」'),
           h(
             'label',
-            { className: 'dpm-sub', style: { display: 'flex', gap: 6, alignItems: 'center' } },
-            h('input', {
-              type: 'checkbox',
-              checked: !!appCfg.showInSidebar,
-              disabled: !!busy,
-              onChange: (e) => doSidebar(e.target.checked),
-            }),
+            { className: 'dpm-sub dpm-swrow' },
+            h(Switch, { checked: !!appCfg.showInSidebar, disabled: !!busy, onChange: (v) => doSidebar(v) }),
             '在左侧边栏放一个「插件管家」图标'
           ),
           h(
@@ -1196,9 +1369,47 @@ window.__ModuleLoader__.load({
           { className: 'dpm-bar' },
           h('span', { className: 'dpm-title' }, '插件管家'),
           ov && ov.host && ov.host.version ? h('span', { className: 'dpm-sub' }, '软件版本 ' + ov.host.version) : null,
+          ov && ov.tool && ov.tool.version ? h('span', { className: 'dpm-sub' }, '管家 v' + ov.tool.version) : null,
           ov ? h('span', { className: 'dpm-sub' }, ov.profile) : null,
-          h(Btn, { disabled: !!busy, onClick: loadOverview }, '重新读一遍')
+          h(Btn, { disabled: !!busy, onClick: doReload, title: '列表、更新检查、备份记录一起刷一遍' }, '重新读一遍'),
+          h(Btn, { disabled: !!busy, onClick: doRestart, title: '关掉软件再自动打开（约 6 秒）—— 新装的插件、改过的设置都靠它生效' }, '重启软件')
         ),
+        // 「上次没装完」的提醒: 装到一半断电/被强退, node_modules 里会留半套文件, 下次可能起不来.
+        recov && recov.verdict === 'needs-restore'
+          ? h(
+              'div',
+              { className: 'dpm-body', style: { padding: '8px 14px 0' } },
+              h(
+                'div',
+                { className: 'dpm-err' },
+                '上次装到一半没装完（' + ((recov.pending && recov.pending.at) || '时间不明') + '），要不要退回那次之前的备份？'
+              ),
+              recov.broken && recov.broken.length
+                ? h('div', { className: 'dpm-sub' }, '看着不对的：' + recov.broken.join(', '))
+                : null,
+              h(
+                'div',
+                { className: 'dpm-tools' },
+                h(Btn, { tone: 'pri', disabled: !!busy, onClick: () => doRecover('restore') }, '退回备份并重开'),
+                h(Btn, { disabled: !!busy, onClick: () => doRecover('dismiss') }, '不用，我知道了')
+              )
+            )
+          : null,
+        // 更新进度: 每一步都写出来, 并且保留 pnpm 输出的最后几行.
+        job
+          ? h(
+              'div',
+              { className: 'dpm-body', style: { padding: '8px 14px 0' } },
+              h(
+                'div',
+                { className: 'dpm-sub' },
+                (job.state === 'running' ? '正在更新：' : job.state === 'updated' ? '更新完了：' : '更新没成功：') +
+                  (job.step || '准备中')
+              ),
+              h('div', { className: 'dpm-prog' }, h('i', { style: { width: Math.round((job.progress || 0) * 100) + '%' } })),
+              job.logTail && job.logTail.length ? h('div', { className: 'dpm-log' }, job.logTail.slice(-6).join('\n')) : null
+            )
+          : null,
         h(
           'div',
           { className: 'dpm-tabs' },
