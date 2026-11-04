@@ -248,12 +248,13 @@ function cmdClean(flags) {
   if (c.error) { console.log(red(c.error)); return 1; }
   const plan = cleanPlan(c.profile);
   const res = cleanApply(plan, { dryRun: !write(flags), includeUnsafe: flags.all === true });
-  if (flags.json) { jsonOut({ profile: c.profile, summary: cleanSummary(plan), dryRun: res.dryRun, deleted: res.deleted, skipped: res.skipped, failed: res.failed, freedBytes: res.freedBytes }); return 0; }
+  if (flags.json) { jsonOut({ profile: c.profile, summary: cleanSummary(plan), dryRun: res.dryRun, notes: plan.notes || [], sessionsBytes: plan.sessionsBytes || 0, attachmentsBytes: plan.attachmentsBytes || 0, deleted: res.deleted, skipped: res.skipped, failed: res.failed, freedBytes: res.freedBytes }); return 0; }
   console.log('');
   console.log(H2('清理  ') + gray(cleanSummary(plan)));
+  for (const n of plan.notes || []) console.log('  ' + gray('· ' + n));
   const groups = {};
   for (const it of plan.items) (groups[it.kind] = groups[it.kind] || []).push(it);
-  const kindLabel = { 'orphan-pkg': '残留包', 'transitive-dep': '传递依赖(建议保留)', 'zero-op-log': '空的安装记录', 'cache-dir': '缓存', 'old-market-snapshot': '旧的市场快照', 'own-cache': '本工具缓存' };
+  const kindLabel = { 'orphan-pkg': '残留包', 'transitive-dep': '传递依赖(建议保留)', 'zero-op-log': '空的安装记录', 'cache-dir': '缓存', 'old-market-snapshot': '旧的市场快照', 'own-cache': '本工具缓存', 'old-snapshot': '本工具的旧备份', 'old-log': '旧的运行日志', 'old-sessions': '旧的对话记录', 'old-attachments': '附件暂存区', 'old-tarball': '旧的打包文件', 'app-cache': '软件界面缓存' };
   for (const k of Object.keys(groups)) {
     const list = groups[k];
     console.log('');
