@@ -165,7 +165,7 @@ async function cmdUpdate(flags) {
   const c = ctx(flags);
   if (c.error) { console.log(red(c.error)); return 1; }
   const plan = await updatePlan(c.profile, { refresh: flags.refresh === true, only: flags.only ? String(flags.only).split(',') : null });
-  const res = updateApply(plan, { write: write(flags), forceIncompatible: flags.force === true });
+  const res = await updateApply(plan, { write: write(flags), forceIncompatible: flags.force === true });
   if (flags.json) { jsonOut({ profile: c.profile, dryRun: res.dryRun, snapshot: res.snapshot, results: res.results, ok: res.ok, failed: res.failed, rollback: res.rollback }); return res.failed ? 1 : 0; }
   console.log('');
   console.log(H2('更新  ' + (res.dryRun ? yellow('预演 (没有改动任何东西)') : green('实际执行'))));
