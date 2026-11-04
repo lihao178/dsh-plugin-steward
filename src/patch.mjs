@@ -40,21 +40,32 @@ export function parseDisabled(text) {
   return set;
 }
 
-/** 在 patch 文本里开启/关闭某个插件条目, 返回新文本; 找不到条目则返回 null */
+/** 在 patch 文本里开启/关闭某个插件条目, 返回新文本.
+ *  - 已有该 id 的条目: 原地改 disabled
+ *  - 没有该 id 的条目: 追加一条 `- id: <id>` + disabled: true
+ *    这很重要 —— 插件多是 bundle 里 insert 进来的, profile 的 patch 里本来就没有它,
+ *    老实现"找不到就返回 null"会让界面上「停用」永远点不动 (宿主回 409).
+ *  - disabled=false 且没有条目: 什么都不用做, 原样返回 */
 export function setDisabledText(text, id, disabled) {
-  const lines = String(text).split('\n');
-  const entries = parseEntries(text);
+  const src = String(text == null ? '' : text);
+  const lines = src.split('\n');
+  const entries = parseEntries(src);
   const hit = entries.find(e => e.id === id);
-  if (!hit) return null;
+  if (!hit) {
+    if (!disabled) return src;
+    const out = src.replace(/\s*$/, '');
+    return (out ? out + '\n' : '') + '- id: ' + id + '\n  disabled: true\n';
+  }
   let found = -1;
   for (let i = hit.line + 1; i <= hit.endLine; i++) {
     if (/^\s+disabled:\s*(true|false)\s*$/.test(lines[i])) { found = i; break; }
   }
   if (found >= 0) {
-    if (disabled) lines[found] = lines[found].replace(/disabled:\s*(true|false)/, 'disabled: true');
-    else lines.splice(found, 1);
-  } else if (disabled) {
-    lines.splice(hit.line + 1, 0, '  disabled: true');
+    // 保留这一行, 只改值: 写成 `disabled: false` 比删掉整行更好读, 也不会留下
+    // 一个只有 `- id: x` 的空条目
+    lines[found] = lines[found].replace(/disabled:\s*(true|false)/, disabled ? 'disabled: true' : 'disabled: false');
+  } else {
+    lines.splice(hit.line + 1, 0, disabled ? '  disabled: true' : '  disabled: false');
   }
   return lines.join('\n');
 }
