@@ -257,6 +257,7 @@ export function scanProfile(profile = DEFAULT_PROFILE, opts = {}) {
       isClient: !!(p.dsh && p.dsh.client),
       inject: (p.dsh && p.dsh.client && Array.isArray(p.dsh.client.inject)) ? p.dsh.client.inject.slice(0, 12) : [],
       peerDependencies: p.peerDependencies || {},
+      repository: p.repository || null,
       updatePolicy: policy,
       sizeBytes,
       capabilities: cap,
