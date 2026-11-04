@@ -17,7 +17,7 @@ import { doctorProfile } from './doctor.mjs';
 export const AUTO_CONFIG = path.join(STATE_DIR, 'auto.json');
 export const AUTO_NDJSON = path.join(REPORT_DIR, 'auto.ndjson');
 
-const DEFAULTS = { enabled: true, allowMajor: true, skip: [] };
+const DEFAULTS = { enabled: true, allowMajor: true, respectPolicy: true, skip: [] };
 
 export function readAutoConfig() {
   const raw = readJson(AUTO_CONFIG, null);
@@ -39,6 +39,9 @@ export function skipReason(row, cfg) {
   const skip = new Set((cfg.skip || []).map((s) => String(s).toLowerCase()));
   if (skip.has(String(row.name).toLowerCase())) return '在 skip 名单里';
   if (row.title && skip.has(String(row.title).toLowerCase())) return '在 skip 名单里';
+  // 面板「设置 → 自动安装」勾着的插件才自动装; 没勾的只在列表里提示可更新.
+  // .state/auto.json 里写 "respectPolicy": false 可以退回「全部都装」的老行为.
+  if (cfg.respectPolicy !== false && row.autoInstall !== true) return '未勾选「自动安装」(去 设置 → 全选自动安装)';
   if (cfg.allowMajor === false && row.kind === 'major') return '主版本升级已被关闭 (allowMajor=false)';
   if (row.ignored) return '已被标记忽略';
   if (row.deferred) return '被延后';
