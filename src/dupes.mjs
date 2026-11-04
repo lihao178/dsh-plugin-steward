@@ -1,4 +1,5 @@
-// 重复检测: 同名多版本 / 功能重复 / 运行时 id 冲突 / 名字过于相似
+// 重复检测: 同名多版本 / 功能重复 / 运行时 id 冲突 / 名字过于相似 / 同一个插件被装了两份
+import fs from 'node:fs';
 import path from 'node:path';
 import { scanProfile } from './scan.mjs';
 import { listDir, humanSize } from './util.mjs';
@@ -143,6 +144,42 @@ export function dupeReport(profile, opts) {
   for (const sp of split) {
     add('info', 'split-install', sp.name + '@' + sp.version, '同一个版本装在 ' + sp.paths.length + ' 个位置: ' + sp.paths.join(' , ') + ' (pnpm 对等依赖导致的重复落盘)', { title: '同版本多路径: ' + sp.name + '@' + sp.version });
   }
-  const summary = { plugins: plugins.length, multiVersion: multiVersion.length, capability: capability.length, cordis: cordis.length, inject: inject.length, similar: similar.length, split: split.length, totalBytes, findings: findings.length };
-  return { profile, root: s.root, scan: s, multiVersion, capability, cordis, inject, similar, split, biggest, totalBytes, findings, summary };
+  // 7) 依赖包被装成好几个不同版本 —— 真正占空间、也可能引起行为差异的那种"重复"
+  //    .modules.yaml 的 hoistedLocations 是 pnpm 的权威清单, 这里纯文本解析, 不引 yaml 依赖。
+  const depCopies = [];
+  try {
+    const yml = fs.readFileSync(path.join(s.root, "node_modules", ".modules.yaml"), "utf8");
+    const at = yml.indexOf("hoistedLocations");
+    const byDep = new Map();
+    if (at >= 0) {
+      const braceAt = yml.indexOf("{", at);
+      if (braceAt >= 0) {
+        const tail = yml.slice(braceAt, braceAt + 400000);
+        const re = /"((?:@[^/"\\]+\/)?[^"@]+)@([^"]+)":\s*\[([^\]]*)\]/g;
+        let m;
+        while ((m = re.exec(tail))) {
+          const nm = m[1];
+          const ver = m[2];
+          const cnt = (m[3].match(/node_modules/g) || []).length || 1;
+          if (names.has(nm)) continue;
+          if (!byDep.has(nm)) byDep.set(nm, []);
+          byDep.get(nm).push({ version: ver, times: cnt });
+        }
+      }
+    }
+    for (const [nm, list] of byDep) {
+      const vers = Array.from(new Set(list.map((x) => x.version)));
+      if (vers.length < 2) continue;
+      depCopies.push({ name: nm, versions: vers.sort(), copies: list.reduce((a, x) => a + x.times, 0) });
+    }
+    depCopies.sort((a, b) => b.copies - a.copies);
+    for (const d of depCopies.slice(0, 12)) {
+      add("info", "dep-multi-version", d.name,
+        "这个依赖被装成了 " + d.versions.length + " 个不同版本: " + d.versions.join(" , ") + " —— 是各个插件自己带进来的, 删不了 (删了插件就坏)",
+        { title: "同一个依赖装了多份: " + d.name, headers: ["版本"], list: d.versions.map((v) => [v]) });
+    }
+  } catch (e) {}
+
+  const summary = { plugins: plugins.length, multiVersion: multiVersion.length, depCopies: depCopies.length, capability: capability.length, cordis: cordis.length, inject: inject.length, similar: similar.length, split: split.length, totalBytes, findings: findings.length };
+  return { profile, root: s.root, scan: s, multiVersion, depCopies, capability, cordis, inject, similar, split, biggest, totalBytes, findings, summary };
 }
