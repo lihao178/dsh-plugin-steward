@@ -172,6 +172,67 @@ health checks, duplicate analysis, cleanup. One left-panel UI, one CLI, zero run
 `src/safety.mjs` 的规则 `title`, `src/scan.mjs` 的 `ORIGIN_LABEL` / `SOURCE_LABEL`)。
 判定阈值、扫描规则、路由、备份与自动重启的行为都没动 —— 改完 19 项活宿主机自检仍 19/19。
 
+## 怎么用: 每个插件都有一段"装上之后怎么使" (1.5.0)
+
+光有一句「这是干什么的」还不够 —— 用户下一步总会问「那我怎么用」。每家的 README 其实都写了,
+只是标题五花八门。`src/usage.mjs` 按常见标题去找, 抽到一段人话存进登记表:
+
+    1. 怎么用 / 如何使用 / 用法 / 使用说明 / 使用示例 / 快速开始 / 快速上手 / 3 分钟上手
+    2. usage / how to use / how it works / getting started / quick start / example
+    3. 找不到时退而求其次: 功能总览 / 功能 / 特性 / 特色功能 / 能力 / 你会得到
+
+抽取时做三件清理, 否则抽出来是一堆没法读的东西:
+
+| 问题 | 处理 | 为什么 |
+| --- | --- | --- |
+| README 是 CRLF 换行 | 先归一化成 `\n` | 标题行尾残留 `\r`, 正则 `(.+)$` 匹配不到, 整份 README 会被判成"没有标题" |
+| 注释/代码块里写着 `eval` 之类 | 超长代码块 (14 行以上) 整块丢掉 | 那是源码, 不是用法 |
+| 能力清单是一张 20 多行的表格 | 留前 4 行 + 「表格还有 N 行, 已省略」 | 全留撑爆面板, 全删就什么都不剩 |
+
+存的位置是 `.state/labels.json` 的 `zh.usage` 字段, **不是插件目录** —— pnpm 升级会把插件目录整个
+换掉, 存里面就丢了。同时记下抽取时的版本 (`usageMeta.version`), 换版本后可以判断该不该重抽。
+
+    POST /api/dsh-plugin-manager/names   {"action":"fill-usage"}          批量抽, 已抽过同版本会跳过
+    POST /api/dsh-plugin-manager/names   {"action":"fill-usage","force":true}  强制全部重抽
+
+面板上每行插件名下面多一个 **▸ 怎么用**, 点开就是那一段 (最多 1800 字, 超出按行截断补省略号)。
+搜索框也会搜这段文字。工具行有 **补怎么用** 按钮。
+
+实测 (2026-11-04, 本机 20 个已装插件): **16 个抽到了**; 剩下 4 个是作者本来就没写用法小节
+(`@local/desktop-control-mcp`、`@local/dsh-plugin-quant`、`@local/dsh-plugin-thrifty`、
+`@tt-a1i/archify-dsh` 的 README 连二级标题都没有)。抽不到就老老实实不显示, 不瞎编。
+
+## 更新源: npm 之外也能认 GitHub Releases (1.5.0)
+
+原来 `check` 只读 npm registry 的 `dist-tags.latest`。问题是**从 GitHub 装的插件根本不在 npm 上**,
+它们永远收不到更新提示 —— 而我们自己就是这种包 (`dsh plugin add github:lihao178/dsh-plugin-steward`)。
+
+`src/releases.mjs` 补上第二个版本源:
+
+| 写法 | 认得出来 | 说明 |
+| --- | --- | --- |
+| `github:owner/repo` | repo + 不锁版本 | 最常见的装法 |
+| `github:owner/repo#v1.2.0` | repo + `pinned` | 锁了 tag 就只看这一版, 不自动跳 |
+| `https://github.com/o/r(.git)(/tree/tag)` | repo + tag | |
+| `git+https://github.com/o/r.git#tag` | repo + tag | |
+| `^1.4.3` / `link:D:/...` | 认不出 → 走 npm | |
+
+只有 **spec 里明写 GitHub 来源** 才走这条路。`package.json` 的 `repository` 字段**不算** ——
+20 个 npm 装的插件里 19 个都带 GitHub 地址, 拿它兜底会把 npm 版本全盖掉。
+
+版本只认 SemVer 的 tag (`v1.4.3` / `1.4.3` 都认), `nightly` 这种直接跳过不猜。查询顺序是
+`/releases/latest` → 失败再 `/releases?per_page=30` 自己挑。结果缓存在 `.state/github-cache.json`,
+默认 6 小时 (匿名 API 每小时只有 60 次)。有 `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT` 会自动带上。
+
+## 自己更新自己 (1.5.0)
+
+更新插件管家自己时**不能先 remove** —— 那个目录里正跑着当前的进程, 删掉之后想 add 就已经没源码了。
+所以自更新的判据 (`updatePlan` 里的 `selfUpdate`) 一旦成立, 就只做原地 `add` 覆盖:
+
+    row.self === true  ||  name === '@local/dsh-plugin-manager'  ||  realPath === TOOL_ROOT
+
+结果里会带 `selfUpdate: true` 供面板区分。配合快照 (更新前自动备份), 装坏了还能退回去。
+
 ## 安全设计
 
 * **默认只预演**。所有会改动磁盘的动作 (update / fix / clean / snapshot restore)
@@ -242,9 +303,20 @@ health checks, duplicate analysis, cleanup. One left-panel UI, one CLI, zero run
 
 | 动作 | 以前 | 现在 |
 | --- | --- | --- |
-| 升级 | 提示「重启 Harness 后生效」 | 自动重启, 回来提示 Ctrl+F5 |
+| 升级 | 提示「重启 Harness 后生效」 | 自动重启, 回来按 Ctrl+F5 |
 | 安装 / 卸载 | 同上 | 自动重启 |
-| 停用 / 启用 | 同上 | 自动重启 |
+| 停用 / 启用 | 同上 | **不重启**(只是关个插件, 不该关窗口), 提示点上方的「重启软件」 |
+| 想立刻生效 | 关掉软件再打开 | 顶栏「重启软件」按钮 |
+
+### 顺序为什么是「先关壳, 再关宿主」(1.6.1)
+
+1.4.0 的做法是「先起新实例, 再杀旧实例」, 这在桌面端会一起触发三件事:
+
+1. 两个 DSH 同时跑 —— 桌面端明确禁止 (`startupAddressInUse`);
+2. 桌面壳把宿主当子进程, 宿主一退出就无条件弹**「应用无法启动或已意外停止」**;
+3. 被杀的宿主, 它的壳也死了, 宿主变成**孤儿进程**留在后台, 还握着 task-board 的账本锁
+   (`task-board ledger is already owned by process 11436`) → 之后每次启动都撞锁、都起不来。
+   实测机器上因此累积了 7 个孤儿宿主。
 
 实现 (`src/restart.mjs`, 思路照 dshmarket 的 `scheduleRestart`):
 
@@ -301,6 +373,25 @@ health checks, duplicate analysis, cleanup. One left-panel UI, one CLI, zero run
 
 > 提醒: **装这个版本本身**还是得手动重启一次——正在跑的宿主没有新路由/新字段。
 > 重启之后就都自动了。
+
+## 更新进度 / 装一半断了怎么办 (1.6.0)
+
+以前点「一键全更新」只能看着转圈等, 装到一半断了也不知道怎么回去。现在:
+
+| 你遇到的 | 面板上会看到 |
+| --- | --- |
+| 正在装 | 顶部进度条 + 「正在装: <插件名> → <新版本> (3/7)」 + pnpm 最后几行输出 |
+| 装完 | 自动重启软件, 提示「重启好了 ✅ 按 Ctrl+F5」 |
+| 装到一半被强退 / 断电 | 下次打开面板顶部红字: 「上次装到一半没装完, 要不要退回那次之前的备份?」+ 一个按钮 |
+| 点「重新读一遍」 | 刷列表 + 更新检查 + 备份记录, 并告诉你「读完了: 24 个插件, 0 个能更新」 |
+
+原理就三件事:
+1. 动 pnpm 之前先把「要装什么、用哪个快照」写进 `.state/pending-update.json`, 全部成功才删;
+2. pnpm 的输出改成逐行读 (`runPnpmStream`), 存进任务表 (`src/jobs.mjs`), 面板拿 `GET /update-status?id=` 轮询;
+3. 下次开机 `GET /recover` 告诉面板上次到哪一步: `none` / `completed` / `needs-restore` / `stale` (超 7 天作废)。
+
+顺便说一个真实踩过的坑: `link:` 装的插件卸载后, pnpm 在 Windows 上可能留下一个指向已删目录的 junction,
+宿主下次启动读它的 `cordis.patch.yml` 会失败, 整个软件就起不来了。现在卸载完强制删残留目录, 自检里也盯着这件事。
 
 ## 停用 / 卸载
 
