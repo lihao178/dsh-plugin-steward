@@ -12,7 +12,18 @@ export const DEFAULT_PROFILE= process.env.DSH_PROFILE || 'desktop';
 export const STATE_DIR      = path.join(TOOL_ROOT, '.state');
 export const SNAPSHOT_DIR   = path.join(STATE_DIR, 'snapshots');
 export const REPORT_DIR     = path.join(TOOL_ROOT, 'reports');
-export const VERSION        = '1.0.0';
+export const VERSION        = readVersion();
+
+// 版本号只认 package.json, 不要在这里手写常量 —— 以前写死过 '1.0.0',
+// 结果包已经到 1.6.0, CLI 和面板还在自称 v1.0.0.
+function readVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(TOOL_ROOT, 'package.json'), 'utf8'));
+    return String(pkg.version || '0.0.0');
+  } catch (e) {
+    return '0.0.0';
+  }
+}
 
 const BOM = String.fromCharCode(0xfeff);
 const ESC = String.fromCharCode(27);
