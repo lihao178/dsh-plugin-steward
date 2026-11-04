@@ -85,12 +85,34 @@ export function saveLabels(table) {
   return LABEL_FILE;
 }
 
-export function setLabel(name, title, description) {
+export function setLabel(name, title, description, usage) {
   const file = readJson(LABEL_FILE, null) || { version: 1, entries: {} };
   file.entries = file.entries || {};
   const cur = file.entries[name] || {};
-  cur.zh = Object.assign({}, cur.zh || {}, { title });
+  cur.zh = Object.assign({}, cur.zh || {});
+  if (title) cur.zh.title = title;
   if (description) cur.zh.description = description;
+  if (usage) cur.zh.usage = usage;
+  if (!cur.zh.title) delete cur.zh;                       // 什么都没写就别留空壳
+  if (!file.entries[name] || Object.keys(cur).length) file.entries[name] = cur;
+  file.version = 1;
+  writeJson(LABEL_FILE, file);
+  return cur;
+}
+
+/**
+ * 只记「怎么用」那一段.
+ * 存在登记表里而不是插件目录里: pnpm 升级会把插件目录整个换掉, 存目录里就丢了.
+ * meta 里额外记下抽取时的版本与来源文件, 换版本之后可以判断该不该重抽.
+ */
+export function setUsage(name, usage, meta) {
+  const file = readJson(LABEL_FILE, null) || { version: 1, entries: {} };
+  file.entries = file.entries || {};
+  const cur = file.entries[name] || {};
+  cur.zh = Object.assign({}, cur.zh || {});
+  if (usage) cur.zh.usage = usage;
+  else delete cur.zh.usage;
+  cur.usageMeta = Object.assign({}, cur.usageMeta || {}, meta || {});
   file.entries[name] = cur;
   file.version = 1;
   writeJson(LABEL_FILE, file);
