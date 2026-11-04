@@ -115,7 +115,7 @@ export async function autoRun(profile, opts) {
   const plan = await updatePlan(profile, { only: picked.map((r) => r.name) });
 
   if (!write) {
-    const preview = updateApply(plan, { write: false });
+    const preview = await updateApply(plan, { write: false });
     const rec = Object.assign(base, {
       preview: preview.results.map((r) => ({ name: r.name, title: r.title, from: r.from, to: r.to, argv: r.argv })),
       ok: 0, failed: 0, note: '预演, 没有改动任何文件 (加 write:true 才真装)',
@@ -125,7 +125,7 @@ export async function autoRun(profile, opts) {
   }
 
   const errorsBefore = doctorProfile(profile).summary.errors;
-  const applied = updateApply(plan, { write: true, forceIncompatible: o.forceIncompatible === true, rollback: false });
+  const applied = await updateApply(plan, { write: true, forceIncompatible: o.forceIncompatible === true, rollback: false });
   const errorsAfter = doctorProfile(profile).summary.errors;
 
   let rollback = null;
