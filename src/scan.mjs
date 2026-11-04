@@ -10,21 +10,21 @@ import { readHoisted, readWorkspace } from './pnpmmeta.mjs';
 import { readPatchState } from './patch.mjs';
 
 export const ORIGIN_LABEL = {
-  self: '自创/本地',
-  market: '市场安装',
-  builtin: '宿主自带',
-  missing: '缺失(未安装)',
-  unknown: '未分类',
+  self: '我自己做的',
+  market: '市场装的',
+  builtin: '系统自带',
+  missing: '找不到（没装上）',
+  unknown: '不知道哪来的',
 };
 export const SOURCE_LABEL = {
-  link: 'link 本地开发',
-  file: 'file 内嵌',
-  local: '@local 本地包',
-  registry: 'registry 市场',
-  builtin: '宿主内置',
-  host: '宿主 payload',
-  missing: '未安装',
-  unknown: '未知',
+  link: '本地目录（自己在改）',
+  file: '打包在 profile 里',
+  local: '本地包（@local）',
+  registry: '从网上市场下的',
+  builtin: '软件自带',
+  host: '软件内置',
+  missing: '没装上',
+  unknown: '不清楚',
 };
 
 const CAP_RULES = [
