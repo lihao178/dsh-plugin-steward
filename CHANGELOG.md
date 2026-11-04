@@ -1,5 +1,126 @@
 # 变更记录
 
+## 1.6.2
+
+这一版修的是两个「看着能用、其实没用」的页面：清理页和重复检测页。
+
+**清理页以前基本是废的**
+- 以前只查 profile 缓存和自己那几个 json，实测能列出来的安全项一共 **288 KB** —— 看着就像没东西可清。
+- 现在补上真占地方的几类（实测这台机器）：
+  - 桌面端 Chromium 缓存：Code Cache 66.3MB / Cache 45.3MB / GrShaderCache 10.6MB / GPUCache 5.6MB … 合计约 **130 MB**；
+  - 30 天前的对话记录（`~/.dsh/sessions`）与附件（`~/.dsh/attachments`）；
+  - 本工具 10 份以前的历史备份快照；
+  - 已经推过的旧打包 tgz；
+  - 7 天前的运行日志。
+- 实测：14 项 / 安全 12 项 / 安全项可释放 **130.0 MB**。
+- 删缓存时如果软件正占着（EBUSY），会跳过并在结果里说明「等关掉软件再清」，不会把别的项一起拖垮。
+
+**重复检测以前只会说「功能相近」**
+- 以前 `multiVersion` 恒为 0（只比插件自己的版本），列出来的「功能重叠 / 共用插槽」都不是能删的重复。
+- 现在会读 pnpm 的 `node_modules/.modules.yaml` 里 `hoistedLocations` 这份权威清单，找出**同一个依赖被装成几个不同版本**，实测查到 5 个：
+  `zod` 3.25.76 / 4.4.3 / 4.6.6 / 4.6.7（9 份）、`undici` 7.30.1 / 8.12.3、`occt.ts` 1.1.0 / 2.0.0、`string-width` 7.2.0 / 8.3.0、`pngjs` 6.0.0 / 7.0.0。
+- 每条都写清楚「这是各个插件自己带进来的，删不了（删了插件就坏）」，不误导人去删。
+
+## 1.6.1
+
+这一版修的是“关掉插件之后软件就再也起不来”的崩溃。根因不在插件本身, 在我 1.4.0 加的那个自重启方式。
+
+**崩溃是怎么回事**
+- 崩溃日志: `ui-task-board: Error: task-board ledger is already owned by process 11436` → 接着 `dsh desktop host exited with 1`。
+- 1.4.0 的自重启顺序是「先开新实例, 再杀旧实例」, 于是有两个进程同时跑; 桌面壳看到自己的宿主退出, 无条件弹「应用无法启动或已意外停止」。
+- 更麻烦的是: 被杀掉的那个宿主, 其壳进程也死了, 宿主变成**孤儿进程**留在后台, 一直握着 task-board 的账本锁 → 之后每次启动都撞锁、都起不来。实测机器上累积了 7 个孤儿宿主。
+
+**现在的重启方式**
+- 顺序反过来: 先关桌面壳 → 再关宿主 → 等两个进程都消失 → 等 0.9 秒 → 用 exe 起一个**全新**的软件。
+- 用 `taskkill /F` 按 pid 关, 每一步都写进 `.state/restart.log`, 出问题能回看。
+- 桌面壳没有“只重启宿主”的接口 (asar 里查过), 所以只能整棵树重开 —— 这是唯一不触发崩溃弹窗的路径。
+
+**面板行为跟着改**
+- 「关掉 / 打开」插件不再自动重启软件: 只是关个插件, 不该把整个窗口关掉。改完提示「点上方的『重启软件』才会真正生效」。
+- 顶部新增「重启软件」按钮, 明确说明“窗口会自己关掉再打开, 约 6 秒”。
+- 装 / 更新 / 删 依然自动重启, 文案改成实话。
+
+**自检 30 项**
+- 新增「没有孤儿宿主进程」: 枚举 `DeepSeek*` 进程, 找出父进程已死的宿主, 必须为 0。这条正是今天崩溃的直接原因。
+
+## 1.6.0
+
+这一版补的是“别再让我反复点、反复等”的三件事: 更新过程能看见、装到一半断了能恢复、按钮点了要有反应。
+
+**更新有进度, 不再像卡死**
+- 更新改成后台任务: `POST /api/dsh-plugin-manager/update {"names":[...],"async":true}` 立刻返回 `jobId`,
+  面板每 0.7 秒拉 `GET /api/dsh-plugin-manager/update-status?id=<jobId>`.
+- 新增 `src/jobs.mjs` (进程内任务表): 记录每一步、耗时、pnpm 输出最后 60 行。
+- 面板顶部出现进度条 + 当前步骤 + pnpm 最后几行输出。
+
+**装到一半断了能恢复**
+- 新增 `src/pending.mjs`: 动 pnpm 之前先写 `.state/pending-update.json` (装哪些、用哪个快照、从什么版本到什么版本), 全部成功才删。
+- `GET /api/dsh-plugin-manager/recover` 判断上次是否装完: `none / completed / needs-restore / stale` (超 7 天作废)。
+- 面板打开时若检测到 `needs-restore`, 顶部红字提示并给「退回备份并重开」按钮。
+- pnpm 输出改为逐行流式读取 (`runPnpmStream`), 便于定位卡在哪一步。
+
+**点了必须有反应**
+- 顶部「重新读一遍」原来只重读列表, 数据没变就什么都不显示, 看起来像按钮坏了。
+  现在一次刷 列表 + 更新检查(强制) + 备份记录 + 残留提醒, 并明确提示「读完了: N 个插件, M 个能更新」。
+- 设置页的勾选框换成 iOS 那种拨动开关, 跟随系统的深色/浅色主题。
+- 卸载后强制清理残留目录: pnpm 在 Windows 上偶发留悬空 junction, 会让宿主起不来。
+
+**一个能让软件起不来的坑 (已堵)**
+- `link:` 装的插件被卸载后, pnpm 可能留下指向已删目录的 junction; 宿主启动读它的 `cordis.patch.yml` 失败 → 整个起不来。
+- 现在 uninstall 之后强制 `rmSync` 残留目录, 自检里也加了一条「没有悬空/坏掉的插件目录」。
+
+**自检 26 项**
+- 新增 `update-status`、`recover` 两项, 目前 26/26 全通过。
+
+## 1.5.0
+
+这一版补的是"让人少点鼠标、少猜"的三件事: 每个插件的**怎么用**、非 npm 来源的**更新检查**、
+以及**自己更新自己**。
+
+**每个插件都有一段「怎么用」**
+- 新增 `src/usage.mjs`: 从插件自己的 README 里抽「装好之后怎么使」那一段。
+  按 `怎么用 / 如何使用 / 用法 / 使用说明 / 使用示例 / 快速开始 / 3 分钟上手` 找,
+  再退到 `usage / how to use / getting started / quick start / example`,
+  最后退到 `功能总览 / 功能 / 特性 / 能力 / 你会得到` 这类"能干什么"的段落。
+- 三个必须做的清理, 不做抽出来没法读:
+  - **CRLF 归一化**: README 是 `\r\n` 换行时, 标题行尾残留 `\r`, `(.+)$` 匹配不到,
+    整份 README 会被判成"没有任何标题"(实测 `dsh-cad` 就是这样, 抽不到任何东西)。
+  - **超长代码块整块丢弃** (>14 行), 那是源码不是用法。
+  - **能力清单表格留前 4 行 + 「表格还有 N 行, 已省略」**, 22 行的表格全留会撑爆面板, 全删又什么都不剩。
+- 存进 `.state/labels.json` 的 `zh.usage`, **不写插件目录** —— pnpm 升级会把目录整个换掉。
+  同时记 `usageMeta.{heading,source,version,at,fallback}`, 换版本后可判断该不该重抽。
+- `POST /api/dsh-plugin-manager/names {"action":"fill-usage"}` 批量抽 (`force:true` 强制重抽);
+  overview 每条多出 `usage / usageFrom / usageHeading / usageVersion`。
+- 面板每行多一个 **▸ 怎么用**, 展开是那一段 (最多 1800 字, 按行截断补省略号);
+  搜索框也搜这段文字; 工具行加 **补怎么用** 按钮。
+- 实测本机 20 个插件: **16 个抽到**, 4 个作者本来就没写用法小节。
+
+**更新源加上 GitHub Releases**
+- 新增 `src/releases.mjs`: `githubSource()` 认 `github:o/r(#tag)` / `https://github.com/o/r(.git)(/tree/tag)`
+  / `git+https://github.com/o/r.git#tag` / 裸 `o/r` 五种写法; `tagVersion()` 只认 SemVer
+  (`v1.4.3`、`1.4.3` 都认, `nightly` 跳过不猜); `fetchLatestRelease()` 先试 `/releases/latest`,
+  失败再 `/releases?per_page=30` 自己挑, 跳过 draft 与非 SemVer。
+- 为什么必须要它: **从 GitHub 装的插件不在 npm 上**, 原来 `check` 只看 npm `dist-tags.latest`,
+  这类包永远收不到更新提示 —— 我们自己的包就是这样。
+- 只在 **spec 明写 GitHub 来源** 时才走这条路。`package.json` 的 `repository` 字段不算:
+  20 个 npm 包里 19 个都带 GitHub 地址, 拿它兜底会把 npm 版本全盖掉 (实测踩到过)。
+- 缓存在 `.state/github-cache.json`, 默认 6 小时 (匿名 API 每小时 60 次);
+  有 `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT` 自动带。锁了 tag 的包标 `skipped:'pinned-git'`, 不自动跳版本。
+- 改完复查 `checkProfile('desktop')`: 20 个插件、可更新 0, 与改动前一致 —— **没有误伤 npm 来源的判断**。
+
+**自己更新自己**
+- `updatePlan()` 的 op 新增 `selfUpdate` (判据 `row.self || name === '@local/dsh-plugin-manager'
+  || realPath === TOOL_ROOT`)、`versionSource`、`githubTarball`。
+- 关键点: 更新自己时**不能先 remove** —— 那个目录里正跑着当前进程, 删掉就没有源码可 add 了。
+  自更新一律原地 `add` 覆盖; 结果里带 `selfUpdate: true` 供面板区分。
+- `updateApply()` 的 dryRun 与真实结果都带 `selfUpdate / versionSource / softFailure`。
+
+**其它**
+- `src/scan.mjs` 的插件记录多给一个 `repository` 字段 (给人看, 不参与更新判定)。
+- `src/labels.mjs`: `setLabel()` 支持第 4 个参数 `usage`; 新增 `setUsage(name, usage, meta)`。
+- `src/humanize.mjs`: `humanizePlugin()` 返回 `usage / usageFrom / usageHeading / usageAt / usageVersion`。
+- 路由仍是 19 条 (没有新增接口, 只是在 `names` 上多认一个 action)。
+
 ## 1.4.3
 
 **侧边栏那一格变成可选, 默认不出现**
