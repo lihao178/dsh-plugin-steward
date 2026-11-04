@@ -92,6 +92,10 @@ export function humanizePlugin(p, idx, tableIn) {
     else if (desc) descFrom = 'english';
   }
 
+  // --- 怎么用 (从插件 README 抽出来的那一段, 存在登记表里) ---
+  const usage = reg && reg.usage ? String(reg.usage).trim() : '';
+  const usageMeta = (row && row.usageMeta) || {};
+
   const descLang = desc ? (hasZh(desc) ? 'zh' : 'en') : 'none';
   const titleLang = hasZh(title) ? 'zh' : 'en';
 
@@ -102,6 +106,11 @@ export function humanizePlugin(p, idx, tableIn) {
     description: desc,
     descriptionFrom: descFrom,
     descriptionLang: descLang,
+    usage,
+    usageFrom: usage ? 'readme' : 'none',
+    usageHeading: usageMeta.heading || null,
+    usageAt: usageMeta.at || null,
+    usageVersion: usageMeta.version || null,
     // 前端可以直接拿来标"要补中文"
     needsZh: titleLang !== 'zh' || descLang === 'en' || descLang === 'none',
     // 英文原名留着, 想对照原文时用
