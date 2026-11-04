@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scanProfile } from './scan.mjs';
-import { STATE_DIR, TOOL_ROOT, listDir, isDir, isFile, dirSize, humanSize } from './util.mjs';
+import { STATE_DIR, TOOL_ROOT, DSH_HOME, listDir, isDir, isFile, dirSize, humanSize } from './util.mjs';
 
 export function cleanPlan(profile, opts) {
   const o = opts || {};
@@ -53,7 +53,10 @@ export function cleanPlan(profile, opts) {
 
 
   // ---- 真正占空间的那几类 (1.6.2) ----
-  const dshHome = path.dirname(s.root);                 // ~/.dsh
+  // 注意: 这里必须用 DSH_HOME。以前写的是 path.dirname(profileRoot), 那只是
+  // ~/.dsh/profiles, 拼出来的 ~/.dsh/profiles/sessions 根本不存在, 所以
+  // 「对话记录/附件」一项都没扫到过。
+  const dshHome = DSH_HOME;                             // ~/.dsh
   const profileSub = path.basename(s.root);             // desktop
 
   // a) 本工具存的历史快照: 只留最近 10 份, 更早的可以删 (要回滚早就该回了)
@@ -84,23 +87,52 @@ export function cleanPlan(profile, opts) {
     }
   }
 
-  // c) 软件自己攒的会话/附件: 超过 30 天的大文件 (只列出来, 让人自己决定)
-  for (const sub of ["sessions", "attachments"]) {
-    const d = path.join(dshHome, sub);
-    if (!isDir(d)) continue;
-    let shown = 0;
-    for (const f of listDir(d)) {
-      if (f.isDirectory()) continue;
-      const p2 = path.join(d, f.name);
-      let st = null;
-      try { st = fs.statSync(p2); } catch (e) { continue; }
-      if (st.mtimeMs > Date.now() - 30 * 24 * 3600 * 1000) continue;
-      push("old-" + sub, p2, st.size, false, "30 天前的" + (sub === "sessions" ? "对话记录" : "附件") + " —— 删了翻不回这段历史", { group: sub });
-      if (++shown >= 20) break;
+  // c) 对话记录: ~/.dsh/sessions/<工作区>/<session-xxx>/session.v4.jsonl.zstd
+  //    一段对话是一个目录(不是一个文件), 所以得往下走两层 —— 否则这里永远是 0 项
+  const oldCut = Date.now() - 30 * 24 * 3600 * 1000;
+  const dshSessions = path.join(dshHome, "sessions");
+  const sessionUnits = [];
+  for (const top of listDir(dshSessions)) {
+    const tv = path.join(dshSessions, top.name);
+    if (!top.isDirectory()) { sessionUnits.push({ p: tv, isDir: false }); continue; }
+    for (const inner of listDir(tv)) {
+      sessionUnits.push({ p: path.join(tv, inner.name), isDir: inner.isDirectory() });
+    }
+  }
+  let sessionsBytes = 0, sessionsOldBytes = 0, sessionsOldCount = 0;
+  const oldSessions = [];
+  for (const u of sessionUnits) {
+    let st = null;
+    try { st = fs.statSync(u.p); } catch (e) { continue; }
+    const size = u.isDir ? dirSize(u.p) : st.size;
+    sessionsBytes += size;
+    if (st.mtimeMs > oldCut) continue;
+    sessionsOldBytes += size;
+    sessionsOldCount++;
+    oldSessions.push({ u, size });
+  }
+  oldSessions.sort((a, b) => b.size - a.size);
+  for (const x of oldSessions.slice(0, 20)) {
+    push("old-sessions", x.u.p, x.size, false,
+      "30 天没动过的对话记录 —— 删了这段历史就翻不回来了, 想留就留着", { group: "sessions" });
+  }
+
+  // d) 附件是内容寻址的(同一份文件被多段对话共用), 不能按文件删, 只报总数 + 清暂存区
+  const attRoot = path.join(dshHome, "attachments", "v1");
+  const attObjects = path.join(attRoot, "objects");
+  const attTmp = path.join(attRoot, "tmp");
+  const attachmentsBytes = isDir(attObjects) ? dirSize(attObjects) : 0;
+  if (isDir(attTmp)) {
+    let ast = null;
+    try { ast = fs.statSync(attTmp); } catch (e) { ast = null; }
+    const tmpSize = dirSize(attTmp);
+    if (tmpSize > 0 && ast && ast.mtimeMs <= Date.now() - 7 * 24 * 3600 * 1000) {
+      push("old-attachments", attTmp, tmpSize, true,
+        "附件的暂存区, 7 天没动过: 里面是没被任何对话引用的临时文件", { group: "attachments" });
     }
   }
 
-  // d) 自己以前打包出来、已经推过的旧 tgz
+  // e) 自己以前打包出来、已经推过的旧 tgz
   const pubDir = path.join(path.dirname(TOOL_ROOT), "dsh-plugin-manager-publish");
   if (isDir(pubDir)) {
     for (const f of listDir(pubDir)) {
@@ -112,7 +144,7 @@ export function cleanPlan(profile, opts) {
     }
   }
 
-  // e) 桌面端(Chromium)自己攒的缓存 —— 这才是真占地方的那一大块, 上百 MB
+  // f) 桌面端(Chromium)自己攒的缓存 —— 这才是真占地方的那一大块, 上百 MB
   const appCache = [
     ["Cache", "网页缓存, 删了只是第一次打开稍慢"],
     ["Code Cache", "编译好的 JS 缓存, 删了会重新编译"],
@@ -133,6 +165,25 @@ export function cleanPlan(profile, opts) {
     }
   }
 
+  // 说明: 光看"可删清单"会让人以为没事可清 —— 真正占地方的东西(对话记录/附件)
+  // 是不敢替人删的, 所以在上面单独说清楚它们有多大
+  const notes = [];
+  if (sessionsBytes > 0) {
+    notes.push(
+      '对话记录一共 ' + humanSize(sessionsBytes) + '（' + sessionUnits.length + ' 段）' +
+      (sessionsOldCount
+        ? '，其中 ' + sessionsOldCount + ' 段超过 30 天没动过（' + humanSize(sessionsOldBytes) + '），已经列在下面'
+        : '，都在 30 天内，所以下面不会列它们 —— 不敢替你删对话')
+    );
+  }
+  if (attachmentsBytes > 0) {
+    notes.push('附件一共 ' + humanSize(attachmentsBytes) +
+      '：附件按内容存，多段对话共用同一份，所以不按文件删；要清就自己看一眼再决定');
+  }
+  if (items.length === 0) {
+    notes.push('没找到能放心删的东西 —— 这台机器挺干净的');
+  }
+
   const safeItems = items.filter((i) => i.safe);
   return {
     profile, root: s.root, items,
@@ -141,6 +192,8 @@ export function cleanPlan(profile, opts) {
     safeCount: safeItems.length,
     unsafeCount: items.length - safeItems.length,
     zeroLogCount: zeroCount,
+    sessionsBytes, sessionsOldBytes, sessionsOldCount, sessionCount: sessionUnits.length,
+    attachmentsBytes, notes,
   };
 }
 
