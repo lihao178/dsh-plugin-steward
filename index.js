@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { profileDir, STATE_DIR, ensureDir } from './src/util.mjs';
+import { profileDir, STATE_DIR, ensureDir, VERSION, TOOL_ROOT } from './src/util.mjs';
 import { scanProfile, ORIGIN_LABEL } from './src/scan.mjs';
 import { checkProfile, evalCompat } from './src/check.mjs';
 import { doctorProfile } from './src/doctor.mjs';
@@ -16,8 +16,9 @@ import { cleanPlan, cleanApply } from './src/clean.mjs';
 import { fixPlan, fixApply } from './src/fix.mjs';
 import { updatePlan, updateApply } from './src/apply.mjs';
 import { createSnapshot, listSnapshots, restoreSnapshot } from './src/snapshot.mjs';
-import { setLabel, loadLabels, applyLabel } from './src/labels.mjs';
+import { setLabel, setUsage, loadLabels, applyLabel } from './src/labels.mjs';
 import { humanizeList, auditNames, humanizePlugin, catIndex, hasZh } from './src/humanize.mjs';
+import { usageOfPlugin } from './src/usage.mjs';
 import { readPatchState, setDisabledText, writePatchText } from './src/patch.mjs';
 import { scheduleStatus } from './src/schedule.mjs';
 import { autoRun, readAutoConfig, writeAutoConfig, readAutoLog } from './src/auto.mjs';
@@ -26,6 +27,8 @@ import { loadCatalog, filterCatalog, sortCatalog, categories as catalogCategorie
 import { hostVersions } from './src/host.mjs';
 import { runPnpm, pnpmDiagnose, readInstalled } from './src/apply.mjs';
 import { restartSelf, launchInfo } from './src/restart.mjs';
+import { newJob, step, tail, finish, getJob, lastJob, listJobs, view as jobView } from './src/jobs.mjs';
+import { writePending, readPending, clearPending, recoverPlan } from './src/pending.mjs';
 
 // pnpm 找不到 (或者跑了但失败) 时, 把「试过哪些路径」一并返回给面板, 免得只看到一句 ENOENT
 function pnpmHint(r) {
@@ -95,6 +98,8 @@ export const ROUTES = {
   names: '/api/dsh-plugin-manager/names',
   restart: '/api/dsh-plugin-manager/restart',
   settings: '/api/dsh-plugin-manager/settings',
+  updateStatus: '/api/dsh-plugin-manager/update-status',
+  recover: '/api/dsh-plugin-manager/recover',
 };
 
 /**
@@ -249,6 +254,8 @@ export function makeRoutes(ctx, config) {
             pid: process.pid,
             startedAt: STARTED_AT,
             builds: BUILD_INFO,
+            // 插件自己的版本号 / 安装目录: 用户截图时能一眼看出跑的是哪一版
+            tool: { version: VERSION, root: TOOL_ROOT },
             pnpm: pnpmDiagnose(),
             host: scan.host,
             hostPayloadCount: scan.hostPayloadCount,
@@ -268,6 +275,10 @@ export function makeRoutes(ctx, config) {
                 rawTitle: h.rawTitle,
                 rawDescription: h.rawDescription,
                 needsZh: h.needsZh,
+                usage: h.usage,
+                usageFrom: h.usageFrom,
+                usageHeading: h.usageHeading,
+                usageVersion: h.usageVersion,
                 version: p.version,
                 spec: p.spec,
                 origin: p.origin,
@@ -331,8 +342,94 @@ export function makeRoutes(ctx, config) {
           const names = Array.isArray(body.names) ? body.names : [];
           const plan = await updatePlan(profile, { refresh: body.refresh === true, only: names });
           if (body.dryRun === true) return writeJson(res, 200, { dryRun: true, plan });
-          const applied = updateApply(plan, { write: true, forceIncompatible: body.force === true, rollback: body.rollback !== false });
-          return writeJson(res, 200, { dryRun: false, plan, applied });
+          const opts = { forceIncompatible: body.force === true, rollback: body.rollback !== false };
+
+          // 同步模式 (CLI / 老客户端): 等它跑完再一次返回
+          if (body.async !== true) {
+            writePending(profile, { reason: '手动更新 ' + plan.ops.length + ' 个插件', ops: plan.ops.map((o) => ({ name: o.name, from: o.from, to: o.to })), pid: process.pid });
+            const applied = await updateApply(plan, opts);
+            if (applied.failed === 0) clearPending();
+            return writeJson(res, 200, { dryRun: false, plan, applied });
+          }
+
+          // 异步模式: 立刻给一个 jobId, 面板每 700ms 拉 /update-status 画进度
+          const job = newJob('update', { plugins: plan.ops.length });
+          writeJson(res, 200, { ok: true, async: true, jobId: job.id, total: plan.ops.length });
+          const t = step(job, '备份当前状态');
+          const pendingRec = writePending(profile, {
+            reason: '更新 ' + plan.ops.length + ' 个插件',
+            ops: plan.ops.map((o) => ({ name: o.name, from: o.from, to: o.to })),
+            pid: process.pid,
+          });
+          t.done();
+          try {
+            const applied = await updateApply(plan, Object.assign({}, opts, {
+              onStep: (ev) => {
+                if (ev.type === 'step-start') step(job, ev.name);
+                else if (ev.type === 'step-done') { const s = job.steps[job.steps.length - 1]; if (s) { s.status = 'done'; s.ms = Date.now() - s.at; if (ev.detail) s.detail = String(ev.detail); } }
+                else if (ev.type === 'step-fail') { const s = job.steps[job.steps.length - 1]; if (s) { s.status = 'fail'; s.ms = Date.now() - s.at; if (ev.detail) s.detail = String(ev.detail); } }
+                else if (ev.type === 'step-skip') { const s = job.steps[job.steps.length - 1]; if (s) { s.status = 'done'; if (ev.detail) s.detail = String(ev.detail); } }
+                else if (ev.type === 'log') tail(job, ev.text);
+              },
+              onLog: (line) => tail(job, line),
+            }));
+            if (applied.failed === 0) clearPending();
+            const st = applied.failed === 0 ? 'done' : (applied.rollback ? 'failed' : 'partial');
+            finish(job, st, {
+              ok: applied.ok, failed: applied.failed, snapshot: applied.snapshot,
+              rollback: applied.rollback ? applied.rollback.id || applied.rollback : null,
+              state: applied.state,
+              results: (applied.results || []).map((r) => ({ name: r.name, ok: !!r.ok, from: r.from, to: r.to, versionAfter: r.versionAfter, state: r.state, error: r.error })),
+              pendingLeft: !!readPending(),
+            });
+          } catch (error) {
+            warn(error);
+            finish(job, 'failed', null, error);
+          }
+          return;
+        } catch (error) {
+          warn(error);
+          return writeJson(res, 500, { error: error && error.message ? error.message : String(error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.updateStatus,
+      handler: async (req, res) => {
+        if (!allowed(req)) return writeJson(res, 403, { error: 'forbidden: loopback only' });
+        const url = new URL(req.url || '/', 'http://x');
+        const id = query(url, 'id');
+        const job = id ? getJob(id) : lastJob('update');
+        if (!job) return writeJson(res, 200, { ok: true, job: null, jobs: listJobs() });
+        return writeJson(res, 200, { ok: true, job: jobView(job) });
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.recover,
+      handler: async (req, res) => {
+        if (!allowed(req)) return writeJson(res, 403, { error: 'forbidden: loopback only' });
+        try {
+          const body = req.method === 'POST' ? await readBody(req) : {};
+          const url = new URL(req.url || '/', 'http://x');
+          const profile = profileOf(url, body);
+          if (req.method !== 'POST') return writeJson(res, 200, Object.assign({ ok: true }, recoverPlan(profile)));
+          const action = body.action || 'inspect';
+          if (action === 'inspect') return writeJson(res, 200, Object.assign({ ok: true }, recoverPlan(profile)));
+          if (action === 'dismiss') {
+            clearPending();
+            return writeJson(res, 200, { ok: true, dismissed: true });
+          }
+          if (action === 'restore') {
+            const plan = recoverPlan(profile);
+            const snap = (plan.pending && plan.pending.snapshot) || body.snapshot;
+            if (!snap) return writeJson(res, 400, { error: '没有可用的快照, 无法退回 (' + plan.verdict + ')' });
+            const r = restoreSnapshot(profile, snap);
+            clearPending();
+            return writeJson(res, 200, { ok: true, restored: snap, result: r, needsRestart: true });
+          }
+          return writeJson(res, 400, { error: '未知 action: ' + action });
         } catch (error) {
           warn(error);
           return writeJson(res, 500, { error: error && error.message ? error.message : String(error) });
@@ -560,6 +657,40 @@ export function makeRoutes(ctx, config) {
             const body = await readBody(req);
             const profile = profileOf(null, body);
             const action = typeof body.action === 'string' ? body.action : 'fill';
+            if (action === 'fill-usage') {
+              // 从每个插件自己的 README 里抽「怎么用」那一段, 存进登记表
+              const scan = scanProfile(profile, { noSize: true });
+              const names = Array.isArray(body.names) ? body.names.map(String) : null;
+              const force = body.force === true;
+              const table = loadLabels();
+              const filled = [];
+              const skipped = [];
+              for (const p of scan.plugins) {
+                if (!p.installed || p.hostProvided) continue;
+                if (names && names.indexOf(p.name) < 0) continue;
+                const reg = table[p.name] || {};
+                const have = reg.zh && reg.zh.usage ? String(reg.zh.usage) : '';
+                const at = (reg.usageMeta && reg.usageMeta.version) || null;
+                // 已经抽过、且抽的是同一个版本, 没要求强制重抽就跳过
+                if (have && !force && at && p.version && at === p.version) {
+                  skipped.push({ name: p.name, reason: '已经抽过了 (' + at + ')' });
+                  continue;
+                }
+                let got = null;
+                try { got = usageOfPlugin(p); } catch (error) { got = { found: false }; }
+                if (!got || !got.found) {
+                  skipped.push({ name: p.name, reason: '这个插件的 README 里没有「怎么用」这一类小节' });
+                  continue;
+                }
+                setUsage(p.name, got.text, {
+                  heading: got.heading || null, source: got.source || null,
+                  version: p.version || null, at: new Date().toISOString(),
+                  fallback: !!got.fallback,
+                });
+                filled.push({ name: p.name, heading: got.heading, chars: got.text.length, fallback: !!got.fallback });
+              }
+              return writeJson(res, 200, { ok: true, filled, skipped, total: filled.length });
+            }
             if (action !== 'fill') return writeJson(res, 400, { error: 'unknown action: ' + action });
             const scan = scanProfile(profile, { noSize: true });
             const idx = catIndex();
@@ -791,7 +922,25 @@ export function makeRoutes(ctx, config) {
             if (body.dryRun === true) return writeJson(res, 200, { dryRun: true, argv: ['pnpm', 'remove', name].join(' ') });
             const snapshot = createSnapshot(profile, '卸载 ' + name + ' 前自动备份');
             const r = runPnpm(root, ['remove', name], { timeoutMs: body.timeoutMs });
-            return writeJson(res, 200, { ok: r.ok, status: r.status, log: r.log, snapshot: snapshot.id, stderr: (r.stderr || '').slice(-600), pnpm: r.ok ? undefined : pnpmHint(r) });
+            // pnpm remove 有时会留下一个悬空的 junction (link: 装的包尤其常见): 目标目录删了,
+            // node_modules/<name> 还在. 下次启动宿主会去读它的 cordis.patch.yml, 读不到就
+            // 报「skipping profile bundle ... must be a top-level YAML array」并且起不来.
+            // 所以卸完再确认一眼, 还剩就自己删掉.
+            const leftover = path.join(root, 'node_modules', name);
+            let leftoverRemoved = false;
+            try {
+              if (fs.existsSync(leftover)) {
+                fs.rmSync(leftover, { recursive: true, force: true });
+                leftoverRemoved = !fs.existsSync(leftover);
+              }
+            } catch (error) {
+              warn(error);
+            }
+            return writeJson(res, 200, {
+              ok: r.ok, status: r.status, log: r.log, snapshot: snapshot.id,
+              leftoverRemoved, gone: !readInstalled(profile, name),
+              stderr: (r.stderr || '').slice(-600), pnpm: r.ok ? undefined : pnpmHint(r),
+            });
           }
           // 组装安装规格: 显式 spec > name@version > name@latest
           let spec = body.spec ? String(body.spec) : null;
@@ -826,8 +975,8 @@ export function makeRoutes(ctx, config) {
     },
     {
       /**
-       * 自重启: 让宿主用原来的启动参数把自己重新拉起来, 用户不用手动关软件.
-       * 安装 / 更新 / 卸载 / 改配置之后调它, 新代码才会被真正加载.
+       * 重启软件: 由 detached helper 先关掉壳和宿主, 确认都退出后再启动一个新的.
+       * 顺序不能反 —— 先起新的会变成两个实例, task-board 账本锁会冲突, 见 src/restart.mjs 顶部注释.
        */
       kind: 'exact',
       path: ROUTES.restart,
@@ -836,22 +985,30 @@ export function makeRoutes(ctx, config) {
         if (req.method !== 'POST') return writeJson(res, 405, { error: 'POST only' });
         try {
           const body = await readBody(req);
-          const waitMs = Number(body.waitMs) || 1500;
-          const delayMs = Number(body.delayMs) || 600;
+          // 兜底自杀时间: helper 正常会先动手, 这个只是防止 helper 被权限挡住时进程赖着不走
+          const delayMs = Number(body.delayMs) || 4000;
           if (body.dryRun === true) {
             const li = launchInfo();
-            return writeJson(res, 200, { dryRun: true, pid: process.pid, execPath: li.execPath, args: li.args, cwd: li.cwd });
+            return writeJson(res, 200, {
+              dryRun: true,
+              pid: process.pid,
+              shellPid: li.shellPid,
+              execPath: li.execPath,
+              args: li.args,
+              cwd: li.cwd,
+            });
           }
           // 先把响应写回去, 再安排重启 —— 否则客户端只会看到连接被重置
           writeJson(res, 200, {
             ok: true,
             pid: process.pid,
-            message: '正在自动重启, 约 ' + Math.round((delayMs + waitMs) / 1000) + ' 秒后恢复',
+            shellPid: launchInfo().shellPid,
+            message: '正在重启软件（会先关掉再自动打开）, 约 6 秒',
             needsReload: true,
           });
           setTimeout(() => {
             try {
-              restartSelf({ waitMs, delayMs });
+              restartSelf({ delayMs });
             } catch (error) {
               warn(error);
             }
