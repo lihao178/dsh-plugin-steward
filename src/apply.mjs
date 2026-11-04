@@ -1,11 +1,15 @@
 // 更新执行: 真正调用 pnpm 装新版本. 默认只预演, 加 {write:true} 才动手, 动手前自动快照
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { profileDir, REPORT_DIR, ensureDir, nowIso, stamp, isFile, DSH_HOME } from './util.mjs';
 import { checkProfile } from './check.mjs';
 import { createSnapshot, restoreSnapshot } from './snapshot.mjs';
 import { satisfies } from './semver.mjs';
+import { TOOL_ROOT } from './util.mjs';
+
+// 插件管家自己的包名. 自更新时不能先 remove (会把正在跑的目录删掉).
+export const SELF_HINT = '@local/dsh-plugin-manager';
 
 // pnpm 位置推导. 不能只靠 process.execPath 往上退两级: 用打包好的桌面端时
 //   execPath = <安装目录>\DeepSeek-Harness.exe
@@ -96,9 +100,16 @@ export async function updatePlan(profile, opts) {
     const exact = /^\d/.test(spec);
     const argv = ['add', row.name + '@' + row.target];
     if (exact) argv.push('--save-exact');
+    // 自更新: 谁在更新插件管家自己, 就不能先 remove 再 add —— remove 会把正在跑的
+    // 这个目录整个删掉, 接下来想 add 的时候源码已经没了。原地 add 覆盖就够。
+    const selfUpdate = !!row.self || row.name === SELF_HINT
+      || (TOOL_ROOT && row.realPath && String(row.realPath).toLowerCase() === String(TOOL_ROOT).toLowerCase());
     ops.push({
       name: row.name, title: row.title, from: row.current, to: row.target, kind: row.kind,
       spec, exact, argv, compat: row.compat, blocked: !!(row.compat && row.compat.ok === false),
+      selfUpdate,
+      versionSource: row.versionSource || 'npm',
+      githubTarball: row.githubTarball || null,
     });
   }
   const align = (res.rows || []).filter((r) => r.alignToHost && r.origin === 'builtin');
@@ -148,39 +159,116 @@ export function runPnpm(root, argv, opts) {
   };
 }
 
-export function updateApply(plan, opts) {
+/**
+ * 和 runPnpm 干同一件事, 但边跑边把输出吐给 onLog —— 面板才能显示「正在装 xxx」而不是干等.
+ * spawnSync 做不到这件事 (它要等进程结束才返回), 所以这里必须是异步的.
+ * 返回结构刻意和 runPnpm 保持一致, 调用方好切换.
+ */
+export function runPnpmStream(root, argv, opts) {
+  const o = opts || {};
+  const bin = pnpmBin();
+  if (!isFile(bin)) return Promise.resolve({ ok: false, status: null, stdout: '', stderr: '找不到 pnpm: ' + bin, bin, softFailure: null });
+  ensureDir(REPORT_DIR);
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [bin].concat(argv), {
+      cwd: root,
+      env: Object.assign({}, process.env, { CI: '1' }),
+    });
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      try { child.kill(); } catch (e) { /* */ }
+    }, o.timeoutMs || 600000);
+    const feed = (chunk, toErr) => {
+      const text = String(chunk);
+      if (toErr) stderr += text; else stdout += text;
+      if (typeof o.onLog === 'function') {
+        // 按行切, 只把非空行吐出去, 免得面板被 \r 刷屏
+        for (const line of text.split(/\r?\n/)) {
+          const t = line.trim();
+          if (t) { try { o.onLog(t); } catch (e) { /* */ } }
+        }
+      }
+    };
+    child.stdout.on('data', (c) => feed(c, false));
+    child.stderr.on('data', (c) => feed(c, true));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, status: null, stdout, stderr: stderr + String(e && e.message), bin, softFailure: null, log: null });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const logFile = path.join(REPORT_DIR, 'pnpm-' + stamp() + '.log');
+      try { fs.writeFileSync(logFile, '$ pnpm ' + argv.join(' ') + String.fromCharCode(10, 10) + stdout + String.fromCharCode(10, 10) + stderr, 'utf8'); } catch (e) { /* */ }
+      const status = killed ? -1 : code;
+      const soft = status === 0 ? null : pnpmSoftFailure(stdout + stderr);
+      resolve({
+        ok: status === 0 || !!soft,
+        status,
+        softFailure: soft,
+        stdout, stderr, log: logFile, bin,
+        timedOut: killed,
+      });
+    });
+  });
+}
+
+export async function updateApply(plan, opts) {
   const o = opts || {};
   const write = o.write === true;
   const results = [];
+  // 进度回调: 面板靠它画「备份 / 装第几个 / 体检 / 还原」这些步骤
+  const say = (ev) => { try { if (typeof o.onStep === 'function') o.onStep(ev); } catch (e) { /* 回调不该影响更新 */ } };
   if (!write) {
     return {
       dryRun: true, write: false, snapshot: null,
-      results: plan.ops.map((op) => ({ name: op.name, title: op.title, from: op.from, to: op.to, kind: op.kind, simulated: true, argv: ['pnpm'].concat(op.argv).join(' ') })),
+      results: plan.ops.map((op) => ({ name: op.name, title: op.title, from: op.from, to: op.to, kind: op.kind, simulated: true, selfUpdate: op.selfUpdate, versionSource: op.versionSource, argv: ['pnpm'].concat(op.argv).join(' ') })),
       ok: 0, failed: 0,
     };
   }
-  const snapshot = createSnapshot(plan.profile, '更新前自动备份');
+  say({ type: 'step-start', name: '备份当前状态' });
+  const snapshot = createSnapshot(plan.profile, o.snapshotReason || '更新前自动备份');
+  say({ type: 'step-done', name: '备份当前状态', detail: snapshot.id });
   let ok = 0, failed = 0;
-  for (const op of plan.ops) {
+  const total = plan.ops.length;
+  for (let i = 0; i < total; i++) {
+    const op = plan.ops[i];
+    const label = '装 ' + (op.name || '?') + (op.to ? ' → ' + op.to : '') + (total > 1 ? ' (' + (i + 1) + '/' + total + ')' : '');
     if (op.blocked && !o.forceIncompatible) {
       results.push({ name: op.name, skipped: true, reason: '兼容性检查未通过: ' + ((op.compat && op.compat.reasons) || []).join('; ') });
+      say({ type: 'step-skip', name: label, detail: '兼容性没通过, 跳过' });
       continue;
     }
-    const r = runPnpm(plan.root, op.argv, { timeoutMs: o.timeoutMs });
+    say({ type: 'step-start', name: label });
+    // 自更新: 先 remove 会把正在运行的目录删掉, 所以永远走 add 覆盖
+    const r = typeof o.onLog === 'function'
+      ? await runPnpmStream(plan.root, op.argv, { timeoutMs: o.timeoutMs, onLog: o.onLog })
+      : runPnpm(plan.root, op.argv, { timeoutMs: o.timeoutMs });
     const after = readInstalled(plan.profile, op.name);
     const good = r.ok && after === op.to;
     if (good) ok++; else failed++;
+    const err = good ? null : (after && after !== op.to ? '装完版本是 ' + after + ', 期望 ' + op.to : (r.stderr || '').split(String.fromCharCode(10)).filter(Boolean).slice(-3).join(' | '));
+    say({ type: good ? 'step-done' : 'step-fail', name: label, detail: good ? ('现在是 ' + after) : err });
     results.push({
       name: op.name, title: op.title, from: op.from, to: op.to, kind: op.kind,
       ok: good, status: r.status, log: r.log, versionAfter: after,
-      error: good ? null : (after && after !== op.to ? '装完版本是 ' + after + ', 期望 ' + op.to : (r.stderr || '').split(String.fromCharCode(10)).filter(Boolean).slice(-3).join(' | ')),
+      selfUpdate: !!op.selfUpdate, versionSource: op.versionSource || 'npm',
+      softFailure: r.softFailure || null,
+      state: good ? 'updated' : 'failed',
+      error: err,
     });
   }
   let rollback = null;
   if (failed && ok === 0 && o.rollback !== false) {
+    say({ type: 'step-start', name: '全部失败, 退回备份' });
     rollback = restoreSnapshot(plan.profile, snapshot.id);
+    say({ type: 'step-done', name: '全部失败, 退回备份', detail: snapshot.id });
+    for (const r of results) if (r.ok) r.state = 'updated';
   }
-  return { dryRun: false, write: true, snapshot: snapshot.id, results, ok, failed, rollback };
+  const state = failed === 0 ? 'updated' : (rollback ? 'rolled-back' : (ok > 0 ? 'partial' : 'failed'));
+  return { dryRun: false, write: true, snapshot: snapshot.id, results, ok, failed, rollback, state };
 }
 
 export function reinstallPlugin(profile, name, opts) {
