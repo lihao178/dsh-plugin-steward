@@ -1191,7 +1191,26 @@ window.__ModuleLoader__.load({
 
       if (tab === 'clean') {
         const items = (cln && cln.items) || [];
-        const KIND_TEXT = { cache: '缓存', log: '日志', temp: '临时文件', backup: '旧备份', duplicate: '重复文件' };
+        // 每一项的类型都用大白话说 —— 以前这里只认 5 个旧类型, 新类型会直接露出英文代号
+        const KIND_TEXT = {
+          cache: '缓存',
+          log: '日志',
+          temp: '临时文件',
+          backup: '旧备份',
+          duplicate: '重复文件',
+          'orphan-pkg': '没人用的残留依赖',
+          'transitive-dep': '别的插件的依赖',
+          'zero-op-log': '空的安装记录',
+          'cache-dir': '安装缓存',
+          'old-market-snapshot': '插件市场的旧快照',
+          'own-cache': '本工具的缓存',
+          'old-snapshot': '本工具的旧备份',
+          'old-log': '旧运行日志',
+          'old-sessions': '旧对话记录',
+          'old-attachments': '旧附件暂存',
+          'old-tarball': '旧的打包文件',
+          'app-cache': '软件界面缓存',
+        };
         content = h(
           'div',
           null,
@@ -1202,6 +1221,9 @@ window.__ModuleLoader__.load({
             h(Card, { value: fmtSize(cln && cln.safeBytes), label: '能腾出的空间' }),
             h(Card, { value: fmtSize(cln && cln.totalBytes), label: '全部加起来' })
           ),
+          (cln && cln.notes && cln.notes.length
+            ? cln.notes.map((t, i) => h('div', { className: 'dpm-note', key: 'n' + i }, t))
+            : null),
           h(
             'div',
             { className: 'dpm-tools' },
