@@ -97,9 +97,11 @@ export function pickTargets(pack, spec) {
 export async function checkProfile(profile, opts) {
   const o = opts || {};
   const s = scanProfile(profile, { orphans: false });
-  const hostVersion = (s.host && s.host.version) || null;
   const hv = hostVersions();
   const hostPkgs = hv.versions || {};
+  // scan 里的 host 就是 hostVersions() 的返回值, 它没有 version 键 ——
+  // 宿主版本要从包映射里取 (@deepseek-ai/dsh 是宿主主包).
+  const hostVersion = (s.host && s.host.version) || hostPkgs['@deepseek-ai/dsh'] || hostPkgs['@deepseek-ai/dsh-acp-app'] || null;
   const marketIdx = loadMarketIndex(s.root);
   const policyRoot = o.updates || loadPolicy(s.root);
   const targets = s.plugins.filter((p) => p.installed && p.origin !== 'missing');
@@ -109,6 +111,7 @@ export async function checkProfile(profile, opts) {
     const row = {
       name: p.name, title: p.title, origin: p.origin, source: p.source, installed: p.installed,
       current: p.version, spec: p.spec, policy,
+      autoInstall: !!(policy && policy.autoInstall === true),
       ignored: false, deferred: false, updatable: false, kind: 'none', reason: '', skipped: null,
       compat: { ok: true, unknown: false, reasons: [], notes: [], prereleaseGate: false },
       latest: null, latestStable: null, wanted: null, target: null,
